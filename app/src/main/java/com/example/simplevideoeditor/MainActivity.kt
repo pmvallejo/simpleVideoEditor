@@ -12,9 +12,12 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.MediaStore
 import android.media.MediaMetadataRetriever
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.util.Size
 import android.widget.*
 import android.graphics.Typeface
 import android.text.Editable
@@ -46,7 +49,8 @@ class MainActivity : AppCompatActivity() {
         val name: String,
         val uri: Uri,
         val sizeBytes: Long,
-        val duration: Double
+        val duration: Double,
+        val thumbnail: Bitmap?
     )
 
     data class Segment(
@@ -61,6 +65,57 @@ class MainActivity : AppCompatActivity() {
     private val segments = mutableListOf<Segment>()
     private val activityLog = ArrayDeque<String>()
     private val maxLogEntries = 300
+
+    private inner class VideoSpinnerAdapter(
+        private val items: List<Video>
+    ) : BaseAdapter() {
+        override fun getCount(): Int = items.size
+        override fun getItem(position: Int): Video = items[position]
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+            createVideoRow(items[position], 52)
+
+        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+            createVideoRow(items[position], 64)
+
+        private fun createVideoRow(video: Video, thumbnailSizeDp: Int): View {
+            val row = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8), dp(6), dp(8), dp(6))
+            }
+            val thumbnail = ImageView(this@MainActivity).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(field)
+                setImageBitmap(video.thumbnail)
+                contentDescription = "Miniatura de ${video.name}"
+            }
+            row.addView(
+                thumbnail,
+                LinearLayout.LayoutParams(dp(thumbnailSizeDp), dp(thumbnailSizeDp)).apply {
+                    marginEnd = dp(10)
+                }
+            )
+            val labels = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            labels.addView(TextView(this@MainActivity).apply {
+                text = video.name
+                textSize = 14f
+                setTextColor(white)
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            labels.addView(TextView(this@MainActivity).apply {
+                text = "${formatTime(video.duration)} · ${formatFileSize(video.sizeBytes)}"
+                textSize = 12f
+                setTextColor(muted)
+            })
+            row.addView(labels, LinearLayout.LayoutParams(0, -2, 1f))
+            return row
+        }
+    }
 
     private lateinit var videoLabel: TextView
     private lateinit var segmentContainer: LinearLayout
@@ -517,11 +572,13 @@ class MainActivity : AppCompatActivity() {
                     selectedName = name
                     val sizeBytes = getFileSize(uri)
                     val retriever = MediaMetadataRetriever()
-                    val durationMs = try {
+                    val (durationMs, thumbnail) = try {
                         retriever.setDataSource(this@MainActivity, uri)
-                        retriever.extractMetadata(
+                        val duration = retriever.extractMetadata(
                             MediaMetadataRetriever.METADATA_KEY_DURATION
                         )?.toLongOrNull() ?: 0L
+                        val frame = loadVideoThumbnail(uri, retriever)
+                        duration to frame
                     } finally {
                         retriever.release()
                     }
@@ -532,7 +589,8 @@ class MainActivity : AppCompatActivity() {
                                 name,
                                 uri,
                                 sizeBytes,
-                                durationMs / 1000.0
+                                durationMs / 1000.0,
+                                thumbnail
                             )
                         )
                     } else {
@@ -585,6 +643,26 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return -1L
+    }
+
+    private fun loadVideoThumbnail(
+        uri: Uri,
+        retriever: MediaMetadataRetriever
+    ): Bitmap? {
+        return try {
+            contentResolver.loadThumbnail(uri, Size(256, 256), null)
+        } catch (_: Exception) {
+            try {
+                retriever.getScaledFrameAtTime(
+                    500_000,
+                    128,
+                    128,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
     }
 
     private fun getFileName(uri: Uri): String {
@@ -719,15 +797,7 @@ class MainActivity : AppCompatActivity() {
             it.name
         }
 
-        val adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            names
-        )
-
-        adapter.setDropDownViewResource(
-            android.R.layout.simple_spinner_dropdown_item
-        )
+        val adapter = VideoSpinnerAdapter(videos)
 
         segments.forEach {
             val selectedUri = it.selectedSourceUri
