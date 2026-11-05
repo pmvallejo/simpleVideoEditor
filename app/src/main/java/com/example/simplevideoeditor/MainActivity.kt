@@ -58,6 +58,8 @@ class MainActivity : AppCompatActivity() {
         val start: EditText,
         val end: EditText,
         val container: LinearLayout,
+        val title: TextView,
+        val removeButton: Button,
         var selectedSourceUri: Uri? = null
     )
 
@@ -251,7 +253,7 @@ class MainActivity : AppCompatActivity() {
         }
         segmentButtons.addView(
             button("Quitar último") {
-                removeSegment()
+                segments.lastOrNull()?.container?.let(::removeSegment)
             },
             removeButtonParams
         )
@@ -704,10 +706,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         val number = segments.size + 1
-
-        row.addView(
-            label("RECORTE $number", 12, accent, true)
-        )
+        val title = label("RECORTE $number", 12, accent, true)
+        val removeButton = button("×") {
+            removeSegment(row)
+        }.apply {
+            textSize = 20f
+            minWidth = dp(44)
+            minHeight = dp(42)
+            contentDescription = "Quitar recorte $number"
+            setBackgroundTintList(
+                android.content.res.ColorStateList.valueOf(Color.rgb(190, 55, 70))
+            )
+        }
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        heading.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(removeButton)
+        row.addView(heading)
 
         val spinner = Spinner(this)
 
@@ -746,10 +763,13 @@ class MainActivity : AppCompatActivity() {
             spinner,
             start,
             end,
-            row
+            row,
+            title,
+            removeButton
         )
 
         segments.add(segment)
+        refreshSegmentControls()
 
         spinner.onItemSelectedListener =
             object : AdapterView.OnItemSelectedListener {
@@ -781,14 +801,24 @@ class MainActivity : AppCompatActivity() {
         refreshSpinners()
     }
 
-    private fun removeSegment() {
-
+    private fun removeSegment(container: LinearLayout) {
         if (segments.size <= 1) return
+        val index = segments.indexOfFirst { it.container === container }
+        if (index < 0) return
+        segments.removeAt(index)
+        segmentContainer.removeView(container)
+        recordLog("Recorte ${index + 1} eliminado")
+        refreshSegmentControls()
+    }
 
-        val last = segments.removeAt(segments.lastIndex)
-
-        segmentContainer.removeView(last.container)
-
+    private fun refreshSegmentControls() {
+        val canRemove = segments.size > 1
+        segments.forEachIndexed { index, segment ->
+            segment.title.text = "RECORTE ${index + 1}"
+            segment.removeButton.isEnabled = canRemove
+            segment.removeButton.alpha = if (canRemove) 1f else 0.45f
+            segment.removeButton.contentDescription = "Quitar recorte ${index + 1}"
+        }
     }
 
     private fun refreshSpinners() {
