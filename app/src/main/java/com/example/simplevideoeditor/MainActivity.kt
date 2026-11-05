@@ -5,7 +5,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import android.app.Activity
 import android.os.Bundle
+import android.os.Build
 import android.content.Intent
+import android.content.ClipData
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.MediaStore
@@ -15,14 +17,20 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import android.graphics.Typeface
+import android.text.Editable
+import android.text.TextWatcher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.ReturnCode
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.util.Locale
+import java.util.ArrayDeque
+import java.util.Date
+import java.text.SimpleDateFormat
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -36,7 +44,8 @@ class MainActivity : AppCompatActivity() {
 
     data class Video(
         val name: String,
-        val file: File,
+        val uri: Uri,
+        val sizeBytes: Long,
         val duration: Double
     )
 
@@ -44,11 +53,14 @@ class MainActivity : AppCompatActivity() {
         val source: Spinner,
         val start: EditText,
         val end: EditText,
-        val container: LinearLayout
+        val container: LinearLayout,
+        var selectedSourceUri: Uri? = null
     )
 
     private val videos = mutableListOf<Video>()
     private val segments = mutableListOf<Segment>()
+    private val activityLog = ArrayDeque<String>()
+    private val maxLogEntries = 300
 
     private lateinit var videoLabel: TextView
     private lateinit var segmentContainer: LinearLayout
@@ -70,6 +82,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        recordLog("Aplicación iniciada")
         buildInterface()
         addSegment()
     }
@@ -232,6 +245,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        formatGroup.setOnCheckedChangeListener { group, checkedId ->
+            val selected = group.findViewById<RadioButton>(checkedId)?.text
+            if (selected != null) recordLog("Formato seleccionado: $selected")
+        }
+
         formatCard.addView(formatGroup)
 
         // PIE DE PANTALLA
@@ -256,6 +274,9 @@ class MainActivity : AppCompatActivity() {
         exportButton = button("EXPORTAR VÍDEO") {
             startExport()
         }
+        val shareLogButton = button("COMPARTIR REGISTRO") {
+            shareActivityLog()
+        }
 
         root.addView(
             scroll,
@@ -277,6 +298,8 @@ class MainActivity : AppCompatActivity() {
         footer.addView(progress)
 
         footer.addView(exportButton)
+        footer.addView(shareLogButton)
+        footer.addView(label("El registro incluye campos y nombres de vídeos.", 11, muted))
 
         root.addView(footer)
 
@@ -320,6 +343,7 @@ class MainActivity : AppCompatActivity() {
                 android.content.res.ColorStateList.valueOf(accent)
             )
             setOnClickListener {
+                recordLog("Pulsación de botón: $text")
                 action()
             }
         }
@@ -376,6 +400,92 @@ class MainActivity : AppCompatActivity() {
             setHintTextColor(muted)
             setPadding(dp(10), dp(8), dp(10), dp(8))
             setBackgroundColor(field)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    recordLog("Campo '$hint' cambiado a '${s?.toString().orEmpty()}'")
+                }
+            })
+        }
+    }
+
+    @Synchronized
+    private fun recordLog(message: String) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
+            .format(Date())
+        synchronized(activityLog) {
+            activityLog.addLast("[$timestamp] $message")
+            while (activityLog.size > maxLogEntries) {
+                activityLog.removeFirst()
+            }
+        }
+    }
+
+    private fun formatFileSize(bytes: Long): String {
+        if (bytes < 0) return "desconocido"
+        if (bytes < 1024) return "$bytes B"
+        val units = arrayOf("KB", "MB", "GB", "TB")
+        var size = bytes.toDouble()
+        var unitIndex = -1
+        do {
+            size /= 1024.0
+            unitIndex++
+        } while (size >= 1024.0 && unitIndex < units.lastIndex)
+        return String.format(Locale.getDefault(), "%.2f %s", size, units[unitIndex])
+    }
+
+    private fun shareActivityLog() {
+        try {
+            val logDirectory = File(cacheDir, "logs")
+            if (!logDirectory.exists() && !logDirectory.mkdirs()) {
+                throw Exception("No se pudo crear el archivo del registro.")
+            }
+
+            val fileName = "clipforge_log_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.txt"
+            val logFile = File(logDirectory, fileName)
+            val eventLines = synchronized(activityLog) { activityLog.toList() }
+            logFile.writeText(buildString {
+                appendLine("Registro de actividad de ClipForge")
+                appendLine("Generado: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.getDefault()).format(Date())}")
+                appendLine("Dispositivo: ${Build.MANUFACTURER} ${Build.MODEL}")
+                appendLine("Android API: ${Build.VERSION.SDK_INT}")
+                appendLine("Versión de la app: ${packageManager.getPackageInfo(packageName, 0).versionName}")
+                appendLine()
+                appendLine("FORMULARIO ACTUAL")
+                appendLine("Vídeos de entrada:")
+                if (videos.isEmpty()) {
+                    appendLine("(ninguno)")
+                } else {
+                    videos.forEach { video ->
+                        appendLine("- ${video.name} (${formatFileSize(video.sizeBytes)})")
+                    }
+                }
+                segments.forEachIndexed { index, segment ->
+                    val selectedVideo = videos.getOrNull(segment.source.selectedItemPosition)?.name ?: "sin seleccionar"
+                    appendLine("Recorte ${index + 1}: vídeo=$selectedVideo; inicio=${segment.start.text}; fin=${segment.end.text}")
+                }
+                val selectedFormat = formatGroup.findViewById<RadioButton>(formatGroup.checkedRadioButtonId)?.text ?: "sin seleccionar"
+                appendLine("Formato: $selectedFormat")
+                appendLine()
+                appendLine("ÚLTIMAS ACCIONES (máximo $maxLogEntries)")
+                if (eventLines.isEmpty()) appendLine("(sin acciones registradas)")
+                eventLines.forEach { appendLine(it) }
+            })
+
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", logFile)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "Registro de actividad de ClipForge")
+                putExtra(Intent.EXTRA_TEXT, "Adjunto el registro de actividad y el estado actual del formulario.")
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newUri(contentResolver, logFile.name, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Compartir registro"))
+        } catch (e: Exception) {
+            recordLog("Error al compartir registro: ${e.javaClass.simpleName}: ${e.message}")
+            showError(e.message ?: "No se pudo preparar el registro.")
         }
     }
 
@@ -384,50 +494,53 @@ class MainActivity : AppCompatActivity() {
     // --------------------------------------------------
 
     private fun importVideos(uris: List<Uri>) {
+        recordLog("Importación iniciada: ${uris.size} archivo(s) seleccionado(s)")
 
         executor.execute {
 
             val imported = mutableListOf<Video>()
+            val importErrors = mutableListOf<String>()
 
             for (uri in uris) {
+                var selectedName = "archivo seleccionado"
 
                 try {
-
+                    try {
+                        contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                    } catch (_: SecurityException) {
+                        // Keep using the temporary read permission granted by the picker.
+                    }
                     val name = getFileName(uri)
-
-                    val destination = File(
-                        cacheDir,
-                        "source_${System.currentTimeMillis()}_${name.replace(Regex("[^a-zA-Z0-9._-]"), "_")}"
-                    )
-
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(destination).use { output ->
-                            input.copyTo(output)
-                        }
-                    } ?: continue
-
+                    selectedName = name
+                    val sizeBytes = getFileSize(uri)
                     val retriever = MediaMetadataRetriever()
-
-                    retriever.setDataSource(destination.absolutePath)
-
-                    val durationMs = retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_DURATION
-                    )?.toLongOrNull() ?: 0L
-
-                    retriever.release()
+                    val durationMs = try {
+                        retriever.setDataSource(this@MainActivity, uri)
+                        retriever.extractMetadata(
+                            MediaMetadataRetriever.METADATA_KEY_DURATION
+                        )?.toLongOrNull() ?: 0L
+                    } finally {
+                        retriever.release()
+                    }
 
                     if (durationMs > 0) {
                         imported.add(
                             Video(
                                 name,
-                                destination,
+                                uri,
+                                sizeBytes,
                                 durationMs / 1000.0
                             )
                         )
+                    } else {
+                        importErrors.add("$name: Android no pudo leer la duración del vídeo")
                     }
 
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    importErrors.add("Error al leer $selectedName: ${e.message ?: e.javaClass.simpleName}")
                 }
             }
 
@@ -435,14 +548,43 @@ class MainActivity : AppCompatActivity() {
 
                 videos.addAll(imported)
 
-                videoLabel.text =
+                videoLabel.text = if (importErrors.isEmpty()) {
                     "${videos.size} vídeo(s) añadido(s)"
+                } else {
+                    "${imported.size} importado(s); ${importErrors.size} con error"
+                }
+
+                imported.forEach {
+                    recordLog("Vídeo de entrada añadido: ${it.name}; tamaño=${formatFileSize(it.sizeBytes)}")
+                }
+                importErrors.forEach { recordLog("Error de importación: $it") }
 
                 refreshSpinners()
 
-                status.text = "Vídeos preparados"
+                status.text = if (importErrors.isEmpty()) "Vídeos preparados" else "Revisa los vídeos no importados"
+                if (importErrors.isNotEmpty()) {
+                    showError(importErrors.joinToString("\n"))
+                }
             }
         }
+    }
+
+    private fun getFileSize(uri: Uri): Long {
+        contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.SIZE),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) {
+                    return cursor.getLong(sizeColumn)
+                }
+            }
+        }
+        return -1L
     }
 
     private fun getFileName(uri: Uri): String {
@@ -548,9 +690,12 @@ class MainActivity : AppCompatActivity() {
                     if (position < videos.size) {
 
                         val video = videos[position]
-
-                        start.setText("00:00")
-                        end.setText(formatTime(video.duration))
+                        if (segment.selectedSourceUri != video.uri) {
+                            segment.selectedSourceUri = video.uri
+                            recordLog("Vídeo seleccionado para recorte: ${video.name}")
+                            start.setText("00:00")
+                            end.setText(formatTime(video.duration))
+                        }
                     }
                 }
             }
@@ -585,11 +730,15 @@ class MainActivity : AppCompatActivity() {
         )
 
         segments.forEach {
-
+            val selectedUri = it.selectedSourceUri
+                ?: videos.getOrNull(it.source.selectedItemPosition)?.uri
+            val selectedPosition = selectedUri?.let { uri ->
+                videos.indexOfFirst { video -> video.uri == uri }
+            } ?: 0
             it.source.adapter = adapter
 
             if (videos.isNotEmpty()) {
-                it.source.setSelection(0)
+                it.source.setSelection(selectedPosition.coerceAtLeast(0))
             }
         }
     }
@@ -674,6 +823,7 @@ class MainActivity : AppCompatActivity() {
     // --------------------------------------------------
 
     private fun startExport() {
+        recordLog("Exportación solicitada")
 
         if (videos.isEmpty()) {
             showError("Añade al menos un vídeo.")
@@ -730,6 +880,7 @@ class MainActivity : AppCompatActivity() {
             102 -> "story"
             else -> "horizontal"
         }
+        recordLog("Exportación iniciada: ${selectedSegments.size} recorte(s), formato=$selectedFormat")
 
         exportButton.isEnabled = false
         progress.progress = 0
@@ -762,7 +913,7 @@ class MainActivity : AppCompatActivity() {
                     )
 
                     val command = buildSegmentCommand(
-                        video.file,
+                        FFmpegKitConfig.getSafParameterForRead(this@MainActivity, video.uri),
                         part,
                         start,
                         end,
@@ -814,7 +965,9 @@ class MainActivity : AppCompatActivity() {
                     runFFmpeg(concatCommand)
                 }
 
+                val outputSize = output.length()
                 val savedUri = saveToGallery(output)
+                recordLog("Vídeo de salida guardado; tamaño=${formatFileSize(outputSize)}")
 
                 tempFolder.deleteRecursively()
 
@@ -823,6 +976,7 @@ class MainActivity : AppCompatActivity() {
                     progress.progress = 100
                     exportButton.isEnabled = true
                     status.text = "¡Exportación terminada!"
+                    recordLog("Exportación completada y guardada en la galería; tamaño=${formatFileSize(outputSize)}")
 
                     Toast.makeText(
                         this,
@@ -832,6 +986,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
             } catch (e: Exception) {
+                recordLog("Error de exportación: ${e.message ?: e.javaClass.simpleName}")
 
                 runOnUiThread {
 
@@ -852,7 +1007,7 @@ class MainActivity : AppCompatActivity() {
     // --------------------------------------------------
 
     private fun buildSegmentCommand(
-        source: File,
+        source: String,
         output: File,
         start: Double,
         end: Double,
@@ -864,7 +1019,7 @@ class MainActivity : AppCompatActivity() {
         val common = listOf(
             "-hide_banner", "-y",
             "-ss", start.toString(),
-            "-i", source.absolutePath,
+            "-i", source,
             "-t", duration.toString()
         )
 
